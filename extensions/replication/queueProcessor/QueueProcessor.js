@@ -11,6 +11,7 @@ const Logger = require('werelogs').Logger;
 const errors = require('arsenal').errors;
 const jsutil = require('arsenal').jsutil;
 const RoundRobin = require('arsenal').network.RoundRobin;
+const ObjectMDLocation = require('arsenal').models.ObjectMDLocation;
 const VaultClient = require('vaultclient').Client;
 const { proxyPath } = require('../constants');
 
@@ -425,8 +426,8 @@ class QueueProcessor {
                 log.debug('setting owner info in target metadata',
                           { entry: destEntry.getLogInfo(),
                             accountAttr });
-                destEntry.setOwner(accountAttr.canonicalID,
-                                   accountAttr.displayName);
+                destEntry.setOwnerId(accountAttr.canonicalID);
+                destEntry.setOwnerDisplayName(accountAttr.displayName);
                 return cb();
             });
     }
@@ -438,8 +439,10 @@ class QueueProcessor {
         const locations = sourceEntry.getLocation();
         const reducedLocations = [];
         let partTotal = 0;
-        if (locations.some(
-            part => sourceEntry.getDataStoreETag(part) === undefined)) {
+        if (locations.some(part => {
+            const partObj = new ObjectMDLocation(part);
+            return partObj.getDataStoreETag() === undefined;
+        })) {
             log.error('cannot replicate object without dataStoreETag ' +
                       'property',
                       { method: 'QueueProcessor._getLocations',
@@ -447,16 +450,17 @@ class QueueProcessor {
             return undefined;
         }
         for (let i = 0; i < locations.length; i++) {
-            const currPart = locations[i];
-            const currPartNum = sourceEntry.getPartNumber(currPart);
-            const nextPart = locations[i + 1];
-            const nextPartNum = nextPart ?
-                sourceEntry.getPartNumber(nextPart) : undefined;
-            if (currPartNum === nextPartNum) {
-                partTotal += sourceEntry.getPartSize(currPart);
-            } else {
-                currPart.size = partTotal += sourceEntry.getPartSize(currPart);
-                reducedLocations.push(currPart);
+            const currPart = new ObjectMDLocation(locations[i]);
+            const currPartNum = currPart.getPartNumber();
+            let nextPartNum = undefined;
+            if (i < locations.length - 1) {
+                const nextPart = new ObjectMDLocation(locations[i + 1]);
+                nextPartNum = nextPart.getPartNumber();
+            }
+            partTotal += currPart.getPartSize();
+            if (currPartNum !== nextPartNum) {
+                currPart.setPartSize(partTotal);
+                reducedLocations.push(currPart.getValue());
                 partTotal = 0;
             }
         }
@@ -476,7 +480,8 @@ class QueueProcessor {
 
     _getAndPutPartOnce(sourceEntry, destEntry, part, log, done) {
         const doneOnce = jsutil.once(done);
-        const partNumber = sourceEntry.getPartNumber(part);
+        const partObj = new ObjectMDLocation(part);
+        const partNumber = partObj.getPartNumber();
         const sourceReq = this.S3source.getObject({
             Bucket: sourceEntry.getBucket(),
             Key: sourceEntry.getObjectKey(),
@@ -518,9 +523,9 @@ class QueueProcessor {
         const destReq = this.backbeatDest.putData({
             Bucket: destEntry.getBucket(),
             Key: destEntry.getObjectKey(),
-            CanonicalID: destEntry.getOwnerCanonicalId(),
-            ContentLength: destEntry.getPartSize(part),
-            ContentMD5: destEntry.getPartETag(part),
+            CanonicalID: destEntry.getOwnerId(),
+            ContentLength: partObj.getPartSize(),
+            ContentMD5: partObj.getPartETag(),
             Body: incomingMsg,
         });
         attachReqUids(destReq, log);
@@ -536,8 +541,8 @@ class QueueProcessor {
                             error: err.message });
                 return doneOnce(err);
             }
-            return doneOnce(null,
-                            destEntry.buildLocationKey(part, data.Location[0]));
+            partObj.setDataLocation(data.Location[0]);
+            return doneOnce(null, partObj.getValue());
         });
     }
 
@@ -552,7 +557,7 @@ class QueueProcessor {
         // sends extra header x-scal-replication-content to the target
         // if it's a metadata operation only
         const replicationContent = (mdOnly ? 'METADATA' : undefined);
-        const mdBlob = entry.getMetadataBlob();
+        const mdBlob = entry.getSerialized();
         const req = target.putMetadata({
             Bucket: entry.getBucket(),
             Key: entry.getObjectKey(),
@@ -657,7 +662,7 @@ class QueueProcessor {
                   { entry: sourceEntry.getLogInfo() });
 
 
-        if (sourceEntry.isDeleteMarker()) {
+        if (sourceEntry.getIsDeleteMarker()) {
             return async.waterfall([
                 next => {
                     this._setupRoles(sourceEntry, log, next);
