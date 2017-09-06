@@ -647,6 +647,11 @@ class QueueProcessor {
                       { error: sourceEntry.error });
             return process.nextTick(() => done(errors.InternalError));
         }
+        if (!this.destHosts) {
+            log.warn('cannot process entry: no target site configured',
+                      { entry: sourceEntry.getLogInfo() });
+            return process.nextTick(() => done(errors.InternalError));
+        }
         return this._processQueueEntry(sourceEntry, log, done);
     }
 
