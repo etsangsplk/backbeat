@@ -164,7 +164,12 @@ class QueuePopulator {
             autoCreateNamespace: this.zkConfig.autoCreateNamespace,
         });
         this.zkClient.connect();
-        this.zkClient.once('ready', done);
+        this.zkClient.once('error', done);
+        this.zkClient.once('ready', () => {
+            // just in case there would be more 'error' events emitted
+            this.zkClient.removeAllListeners('error');
+            done();
+        });
     }
 
     _setupUpdatedReaders(done) {
