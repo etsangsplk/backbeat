@@ -11,6 +11,7 @@ const Logger = require('werelogs').Logger;
 const errors = require('arsenal').errors;
 const jsutil = require('arsenal').jsutil;
 const RoundRobin = require('arsenal').network.RoundRobin;
+const ARN = require('arsenal').models.ARN;
 const VaultClient = require('vaultclient').Client;
 const { proxyPath } = require('../constants');
 
@@ -54,7 +55,16 @@ class _AccountAuthManager {
             throw Error(`Configured account ${authConfig.account} has no ` +
                         '"displayName" property defined');
         }
-        this._accountArn = accountInfo.arn;
+        const accountArn = ARN.createFromString(accountInfo.arn);
+        if (accountArn.error !== undefined) {
+            throw Error(`Configured account ${authConfig.account} has a ` +
+                        `bad ARN "${accountInfo.arn}": ${accountArn.error}`);
+        }
+        if (!accountArn.isIAMAccount()) {
+            throw Error(`Configured account ${authConfig.account} ARN is ` +
+                        'not an account ARN');
+        }
+        this._accountArn = accountArn;
         this._canonicalID = accountInfo.canonicalID;
         this._displayName = accountInfo.displayName;
         this._credentials = new AWS.Credentials(accountInfo.keys.access,
@@ -66,7 +76,7 @@ class _AccountAuthManager {
     }
 
     lookupAccountAttributes(accountId, cb) {
-        const localAccountId = this._accountArn.split(':')[4];
+        const localAccountId = this._accountArn.getAccountId();
         if (localAccountId !== accountId) {
             this._log.error('Target account for replication must match ' +
                             'configured destination account ARN',
@@ -166,7 +176,8 @@ class QueueProcessor {
         // FIXME support multiple destination sites
         if (destConfig.bootstrapList.length > 0) {
             this.destHosts =
-                new RoundRobin(destConfig.bootstrapList[0].servers);
+                new RoundRobin(destConfig.bootstrapList[0].servers,
+                               { defaultPort: 80 });
         } else {
             this.destHosts = null;
         }
@@ -801,7 +812,7 @@ class QueueProcessor {
 
     start() {
         const consumer = new BackbeatConsumer({
-            zookeeper: this.zkConfig,
+            zookeeper: { connectionString: this.zkConfig.connectionString },
             topic: this.repConfig.topic,
             groupId: this.repConfig.queueProcessor.groupId,
             concurrency: 1, // replication has to process entries in
